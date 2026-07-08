@@ -16,7 +16,7 @@
  * api.anthropic.com/api/oauth/usage 조회 (OMC HUD와 동일 방식), 60초 파일 캐시.
  */
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, userInfo } from 'node:os';
@@ -125,9 +125,10 @@ const parts = [];
   }
 
   async function getUsage() {
+    let cached = null;
     try { // 캐시가 신선하면 API 호출 생략
-      const c = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
-      if (Date.now() - c.at < (c.ok ? TTL_OK : TTL_FAIL)) return c.data;
+      cached = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
+      if (Date.now() - cached.at < (cached.ok ? TTL_OK : TTL_FAIL)) return cached.data;
     } catch { /* 캐시 없음 */ }
     let data = null;
     const token = readToken();
@@ -138,9 +139,15 @@ const parts = [];
           signal: AbortSignal.timeout(1500),
         });
         if (res.ok) data = await res.json();
-      } catch { /* 네트워크 실패 → 캐시에 실패 기록 */ }
+      } catch { /* 네트워크 실패 → 아래에서 직전 성공 데이터로 대체 */ }
     }
-    try { writeFileSync(CACHE_PATH, JSON.stringify({ at: Date.now(), ok: !!data, data })); } catch { /* 캐시 저장 실패는 무시 */ }
+    const ok = !!data;
+    if (!ok) data = cached?.data ?? null; // 실패해도 마지막 성공 데이터를 유지 (HUD 깜빡임 방지)
+    try { // 임시 파일에 쓰고 rename — 동시 실행 세션끼리 캐시를 반쯤 덮어써 깨뜨리는 것 방지
+      const tmp = `${CACHE_PATH}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ at: Date.now(), ok, data }));
+      renameSync(tmp, CACHE_PATH);
+    } catch { /* 캐시 저장 실패는 무시 */ }
     return data;
   }
 
